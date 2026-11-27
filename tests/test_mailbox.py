@@ -2,10 +2,12 @@ import asyncio
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import call, patch
 from uuid import uuid4
 
 from httpx import ASGITransport, AsyncClient
 
+from agent_mailbox.cli import MailboxClient
 from agent_mailbox.server import create_app
 
 
@@ -88,17 +90,44 @@ class MailboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(len((await self.client.get("/inbox", headers=self.claude)).json()["messages"]), 1)
 
-    async def test_waiting_receive_returns_when_peer_sends(self):
+    async def test_wait_after_ignores_old_pending_mail_without_acknowledging_it(self):
+        old_id = (await self.send()).json()["id"]
         waiting = asyncio.create_task(
-            self.client.get("/inbox", headers=self.claude, params={"wait": 3}),
+            self.client.get(
+                "/inbox", headers=self.claude, params={"wait": 3, "after": old_id},
+            ),
         )
         await asyncio.sleep(0.05)
         self.assertFalse(waiting.done())
-        self.assertEqual((await self.send()).status_code, 200)
+        new_id = (await self.send("NEXT")).json()["id"]
         received = await asyncio.wait_for(waiting, timeout=2)
-        self.assertEqual(received.json()["messages"][0]["sender"], "codex")
+        self.assertEqual([message["id"] for message in received.json()["messages"]], [new_id])
+        pending = (await self.client.get("/inbox", headers=self.claude)).json()["messages"]
+        self.assertEqual([message["id"] for message in pending], [old_id, new_id])
         result = await self.client.get("/inbox", headers=self.codex, params={"wait": 0.05})
         self.assertEqual(result.json(), {"messages": []})
+
+
+class ReceiveWaitTests(unittest.TestCase):
+    def test_client_waits_across_broker_requests_and_reuses_cursor(self):
+        client = MailboxClient(8765, Path("unused.json"))
+        empty = {"messages": []}
+        next_mail = {"messages": [{"id": 43, "text": "NEXT"}]}
+        cases = [
+            (next_mail, 135),
+            (empty, 140),
+        ]
+        for final, end_time in cases:
+            with (
+                self.subTest(final=final),
+                patch.object(client, "_request", side_effect=[empty, final]) as request,
+                patch("agent_mailbox.cli.monotonic", side_effect=[100, 125, end_time]),
+            ):
+                self.assertEqual(client.receive(wait=40, after=42), final)
+                self.assertEqual(request.call_args_list, [
+                    call("GET", "/inbox", params={"wait": 25, "after": 42}),
+                    call("GET", "/inbox", params={"wait": 15, "after": 42}),
+                ])
 
 
 if __name__ == "__main__":

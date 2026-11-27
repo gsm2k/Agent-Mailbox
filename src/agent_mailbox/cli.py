@@ -5,11 +5,15 @@ import json
 import os
 import secrets
 import sys
+from math import isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import monotonic
 from uuid import UUID
 
 import httpx
+
+from . import MAX_RECEIVE_WAIT_SECONDS
 
 
 class MailboxError(Exception):
@@ -73,8 +77,20 @@ class MailboxClient:
             data["request_id"] = str(request_id)
         return self._request("POST", "/messages", json=data)
 
-    def receive(self, wait: float = 0):
-        return self._request("GET", "/inbox", params={"wait": wait})
+    def receive(self, wait: float = 0, after: int = 0):
+        if not isfinite(wait) or wait < 0:
+            raise MailboxError("Wait must be a finite, non-negative number of seconds")
+
+        deadline = monotonic() + wait
+        remaining = wait
+        while True:
+            result = self._request(
+                "GET", "/inbox",
+                params={"wait": min(remaining, MAX_RECEIVE_WAIT_SECONDS), "after": after},
+            )
+            remaining = deadline - monotonic()
+            if result["messages"] or remaining <= 0:
+                return result
 
     def ack(self, message_id: int):
         return self._request("POST", f"/inbox/{message_id}/ack")
@@ -101,7 +117,9 @@ def main():
     send.add_argument("to")
     send.add_argument("text")
     send.add_argument("--request-id", type=UUID)
-    commands.add_parser("receive").add_argument("--wait", type=float, default=0)
+    receive = commands.add_parser("receive")
+    receive.add_argument("--wait", type=float, default=0, help="Total time to wait in seconds")
+    receive.add_argument("--after", type=int, default=0, help="Only return messages above this ID")
     commands.add_parser("ack").add_argument("message_id", type=int)
     args = parser.parse_args()
 
@@ -124,7 +142,7 @@ def main():
             case "send":
                 result = client.send(args.to, args.text, args.request_id)
             case "receive":
-                result = client.receive(args.wait)
+                result = client.receive(wait=args.wait, after=args.after)
             case "ack":
                 result = client.ack(args.message_id)
     except (MailboxError, OSError, ValueError, KeyError) as exc:
