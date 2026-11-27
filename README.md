@@ -36,6 +36,16 @@ uv run agent-mailbox --identity .mailbox/codex.json receive --after 42 --wait 54
 
 Use the highest message ID you have already seen as `--after` when you want to wait for new mail while older messages are still pending. Acknowledge each message when handled. To recover pending messages after restarting, run `receive` without a cursor. The CLI handles the 25-second broker requests internally.
 
+A completed wait with no new mail exits successfully with `{"messages": []}`. A broker restart can interrupt a wait with exit status `1`. Check that the broker is running and retry with the same cursor. Count only a successful empty result as a timeout.
+
+For a coordinator watch in Git Bash, start with `after=0` or the highest ID already seen. After preserving or handling the batch, update the cursor from the successful receive response in `reply`:
+
+```bash
+after=$(uv run python -c 'import json, sys; print(max((m["id"] for m in json.load(sys.stdin)["messages"]), default=int(sys.argv[1])))' "$after" <<< "$reply")
+```
+
+An empty response leaves the cursor where it was.
+
 ## Queue handoffs before starting agents
 
 With the broker running, register the names from a setup terminal. Registration reserves the inbox, so the coordinator can send a kickoff before starting the worker or reviewer.
