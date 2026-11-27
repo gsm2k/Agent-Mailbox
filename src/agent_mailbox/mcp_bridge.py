@@ -1,9 +1,12 @@
 """A stdio MCP bridge with one identity per launched session."""
 
 import argparse
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
+from pydantic import Field
+
+from . import MAX_RECEIVE_WAIT_SECONDS
 from .cli import MailboxClient, add_client_options
 
 
@@ -37,9 +40,12 @@ def main():
         return mailbox.send(to, text, request_id)
 
     @mcp.tool()
-    def receive(wait_seconds: float = 0) -> dict[str, Any]:
-        """Read up to 50 pending messages, waiting up to 25 seconds for delivery."""
-        return mailbox.receive(wait_seconds)
+    def receive(
+        wait_seconds: Annotated[float, Field(ge=0, le=MAX_RECEIVE_WAIT_SECONDS)] = 0,
+        after: Annotated[int, Field(ge=0, le=2**63 - 1)] = 0,
+    ) -> dict[str, Any]:
+        """Read pending messages above an optional message ID, waiting up to 25 seconds."""
+        return mailbox.receive(wait=wait_seconds, after=after)
 
     @mcp.tool()
     def ack(message_id: int) -> dict[str, Any]:

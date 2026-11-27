@@ -14,6 +14,8 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, StringConstraints
 
+from . import MAX_RECEIVE_WAIT_SECONDS
+
 Name = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,47}$")]
 MessageText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8192)]
 bearer = HTTPBearer(auto_error=False)
@@ -131,17 +133,18 @@ def create_app(db_path: Path) -> FastAPI:
     @app.get("/inbox")
     def receive(
         recipient: Session,
-        wait: Annotated[float, Query(ge=0, le=25)] = 0,
+        wait: Annotated[float, Query(ge=0, le=MAX_RECEIVE_WAIT_SECONDS)] = 0,
+        after: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
     ):
         def pending():
             with connect() as db:
                 rows = db.execute(
                     """
                     SELECT id, sender, recipient, text, sent_at FROM messages
-                    WHERE recipient = ? AND acknowledged_at IS NULL
+                    WHERE recipient = ? AND acknowledged_at IS NULL AND id > ?
                     ORDER BY id LIMIT 50
                     """,
-                    (recipient,),
+                    (recipient, after),
                 ).fetchall()
             return [dict(row) for row in rows]
 

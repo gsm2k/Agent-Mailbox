@@ -28,7 +28,46 @@ uv run agent-mailbox --identity .mailbox/claude.json send codex-worker "NEXT: re
 uv run agent-mailbox --identity .mailbox/codex.json receive --wait 25
 ```
 
-Use `--wait 25` to wait for a message for up to 25 seconds, or omit it for an immediate check. Try stopping the broker after sending the reply and starting it again with the same database path. The existing Codex identity can still receive the reply.
+Omit `--wait` for an immediate inbox check. The CLI also accepts longer waits. For example, to wait up to nine minutes for a message newer than ID `42`:
+
+```powershell
+uv run agent-mailbox --identity .mailbox/codex.json receive --after 42 --wait 540
+```
+
+Use the highest message ID you have already seen as `--after` when you want to wait for new mail while older messages are still pending. Acknowledge each message when handled. To recover pending messages after restarting, run `receive` without a cursor. The CLI handles the 25-second broker requests internally.
+
+A completed wait with no new mail exits successfully with `{"messages": []}`. A broker restart can interrupt a wait with exit status `1`. Check that the broker is running and retry with the same cursor. Count only a successful empty result as a timeout.
+
+To watch for new mail in Git Bash, set `AGENT_MAILBOX_IDENTITY` to the coordinator's identity file and run this from the mailbox checkout. The loop prints new batches and advances the cursor. Empty batches leave the cursor unchanged, and failed reads or parsing errors wait before retrying. Acknowledge each message after handling it.
+
+```bash
+after=0
+while true; do
+  if reply=$(uv run agent-mailbox receive --after "$after" --wait 540) &&
+     next_after=$(uv run python -c 'import json, sys; print(max((m["id"] for m in json.load(sys.stdin)["messages"]), default=int(sys.argv[1])))' "$after" <<< "$reply"); then
+    if [ "$next_after" != "$after" ]; then
+      printf '%s\n' "$reply"
+      after=$next_after
+    fi
+  else
+    sleep 15
+  fi
+done
+```
+
+## Queue handoffs before starting agents
+
+With the broker running, register the names from a setup terminal. Registration reserves the inbox, so the coordinator can send a kickoff before starting the worker or reviewer.
+
+```powershell
+uv run agent-mailbox --identity .mailbox/claude.json register claude-coordinator
+uv run agent-mailbox --identity .mailbox/codex.json register codex-worker
+uv run agent-mailbox --identity .mailbox/gemini.json register gemini-reviewer
+```
+
+Give each agent its registered identity file. If using the CLI from a separate worktree, pass its absolute path or set `AGENT_MAILBOX_IDENTITY` in that session's environment. Use mailbox messages as notices for longer handoffs and reviews. Once a report is ready, send a notice with its path, the commit SHA, and the verdict when applicable.
+
+Run a quick `receive` from Codex's actual shell before relying on it for the pilot. The shell must be able to read the identity file and connect to the loopback broker under the active sandbox profile. [Codex network permissions](https://learn.chatgpt.com/docs/agent-approvals-security#network-access)
 
 ## Connect an agent session with MCP
 
@@ -53,7 +92,9 @@ Here is an example stdio configuration for a Claude Code test session on Windows
 
 Claude Code and Antigravity accept stdio configurations in this shape. Codex uses `[mcp_servers.agent-mailbox]` in its TOML configuration. In either case, use the same executable and arguments for the bridge. If the host cannot find `uv` on PATH, use its absolute path. [Claude MCP configuration](https://code.claude.com/docs/en/mcp) · [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp) · [Antigravity MCP configuration](https://antigravity.google/docs/cli/mcp/)
 
-The tools are `register(name)`, `send(to, text, request_id)`, `receive(wait_seconds)`, and `ack(message_id)`. A useful pilot is to give two agents a task each, ask one to send a review request with an exact head SHA, then have the other call `receive` and reply. Delivery happens when a session calls `receive`. To wake an idle agent automatically, add a harness adapter later. For example, a Codex CLI adapter could pass the message to [`codex queue`](https://learn.chatgpt.com/docs/cli/reference#codex-queue).
+The tools are `register(name)`, `send(to, text, request_id)`, `receive(wait_seconds, after)`, and `ack(message_id)`. Use MCP for short inbox checks of up to 25 seconds and one CLI call for longer waits. A useful pilot is to give two agents a task each, ask one to send a review request with an exact head SHA, then have the other call `receive` and reply.
+
+Delivery happens when a session or a process acting on its behalf calls `receive`. Automatic wake-up would use a harness adapter, for example a process that resumes a headless Codex session on receipt. Interactive sessions can hold a writer lock that leaves messages sent with `codex queue --resume` queued until the next turn. [Codex resume](https://learn.chatgpt.com/docs/non-interactive-mode#resume-a-non-interactive-session) · [Codex issue #63991](https://github.com/openai/codex/issues/63991)
 
 ## Delivery and local state
 
@@ -70,7 +111,7 @@ The tools are `register(name)`, `send(to, text, request_id)`, `receive(wait_seco
 uv run python -m unittest discover -s tests -v
 ```
 
-The tests cover identity conflicts, inbox access, bounded waiting, delivery across a restart, and safe retry of sends and acknowledgments.
+The tests cover identity conflicts, inbox access, waits with pending older messages, waits spanning multiple requests, delivery across a restart, and safe retry of sends and acknowledgments.
 
 ## Existing Python options
 
